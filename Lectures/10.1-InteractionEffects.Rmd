@@ -1,0 +1,319 @@
+---
+title: 'Week 10, Part 1: Interaction Effects in Regression'
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE, fig.width=5, fig.height=5)
+
+```
+
+```{r dataProcessing}
+library(car)
+library(margins)
+library(tidyverse)
+library(ggplot2)
+library(kableExtra)
+
+options(knitr.kable.NA = '')
+
+dat.ex = read.csv("../../Data/dataset_ANOVA_TwoWayInteraction.csv")
+
+#contraception data
+dat = read.csv("../../Data/contraceptiveData.csv")
+
+dat$education = factor(dat$education,levels=c("low","high"))
+dat$wantsMore = factor(dat$wantsMore,levels=c("no","yes"),labels=c("I don/t","I-do"))
+dat$age = factor(dat$age,levels=unique(dat$age))
+
+#NHANES data
+dat02 = read.csv("../../Data/NHANES.csv",na.strings='',stringsAsFactors=FALSE)
+dat02$health = factor(dat02$health,levels=c("poor","fair","average","good","excellent"))
+dat02$health.num = as.numeric(dat02$health)
+
+
+```
+
+# Interaction Example
+This data is taken from [this tutorial](http://rtutorialseries.blogspot.com/2011/02/r-tutorial-series-two-way-anova-with.html).  We'll start with the simple visualizations, then build and interpret the models
+
+```{r exFigs, fig.height=4, fig.width=12}
+
+tab = table(dat.ex$StressReduction)
+par(mfrow=c(1,3))
+barplot(tab,color=grey(0.7),xlab='Stress Score')
+boxplot(StressReduction~Treatment,data=dat.ex,col=2:4)
+boxplot(StressReduction~Gender,data=dat.ex,col=5:6)
+
+```
+
+We'll start with a simple model that has no interactions, building the model and getting the coefficients
+```{r ex.simpleModel}
+
+modEx01 = lm(StressReduction~Treatment+Gender,data=dat.ex)
+Anova(modEx01)
+summary(modEx01)
+
+```
+
+We can see the interaction effect by looking at the averages across the two treatments, this is where the `tapply` functions can be very useful.  The general use of the function is `tapply(y,x,fun)` where we take the values of `y` separately for each level of `x` and apply function `fun`.  So we can see that this function gets the average of Stress Score across the treatment groups
+
+```{r}
+tapply(dat.ex$StressReduction,dat.ex$Treatment,mean)
+```
+
+And if we pass a list to x it will do all the combinations of the levels of all variables in the list
+
+```{r}
+tapply(dat.ex$StressReduction, list(dat.ex$Gender,dat.ex$Treatment), mean)
+```
+
+To specify an interaction model we'll use the `X*Y` notation in the model formula to specify that `X`, `Y` and their interaction should be in the model
+
+```{r ex.interactionModel}
+modEx.interaction01 = lm(StressReduction~Treatment*Gender,data=dat.ex)
+Anova(modEx.interaction01)
+summary(modEx.interaction01)
+
+```
+
+We can see the interaction is significant - to get the predicted values we can use the `predict` command with a new dataset that has the values we want.  A function called `expand.grid` is useful here, to get all possible combinations of two variables.
+
+```{r ex.predictions}
+
+newDat.ex = expand.grid(Treatment=unique(dat.ex$Treatment),Gender=unique(dat.ex$Gender))
+pred.ex.simple = predict(modEx01,newdata = newDat.ex)
+pred.ex.interaction = predict(modEx.interaction01,newdata = newDat.ex)
+out.ex = cbind(newDat.ex,regular=pred.ex.simple,interaction=pred.ex.interaction)
+out.ex
+
+```
+
+# Contraceptive Example
+We've done the non-interaction model before, so we'll mostly explore the interaction model.  We'll focus on the interaction between `age` and `wantsMore`, starting with the model and variable significance.
+
+```{r cont.interaction}
+
+modCont.aw = glm(using~education+age*wantsMore,data=dat,family=binomial)
+Anova(modCont.aw)
+summary(modCont.aw)
+
+```
+
+We could get the ORs from the coefficients in `modCont.aw`, but it's easier to do it with the `margins` command.
+
+# Margins
+We'll start by getting the marginal probabilities and the marginal plot. the library `margins` is designed to emulate the same function in STATA.  There's a good [vignette](https://cran.r-project.org/web/packages/margins/vignettes/Introduction.html) available that should help in learning how it works.
+
+We'll look at two functions: `prediction` for getting probabilities and `margins` for getting odds ratios.  These objects can be a bit difficult to manipulate, but are the most effective way
+When using the command you need to use the `at` option: it specifies what variable you want to calculate the marginal averages across. In this particular example we're most interested in the marginals across `age` and `wantsMore`, so we'll specify those using the `at` command.  We'll start with looking at them across the `wantsMore` variable. 
+
+```{r cont.prediction}
+
+pred.cont.aw = prediction(modCont.aw,
+      at=list(
+        age=levels(dat$age),
+        wantsMore=levels(dat$wantsMore)
+      ),
+      calculate_se = TRUE)
+pred.cont.aw
+summary(pred.cont.aw)
+
+```
+
+The `prediction` function produces predicted probabilities with confidence intervals, but unfortunately doesn't come with a good plotting function, so we'll have to plot it ourselves - we want lines for one variable across the other, in this case lines for no and yes.
+
+```{r cont.pred.figure,fig.height=5,fig.width=8}
+
+#the summary object is a dataframe, but the variable names are clumsy
+#so I rename them first, then ggplot them
+summary(pred.cont.aw)|>
+  rename(age=`at(age)`,
+         wantsMore=`at(wantsMore)`) |>
+  ggplot(aes(x=age,y=Prediction,colour=wantsMore,group=wantsMore))+
+  geom_point()+
+  geom_line()+
+  geom_errorbar(aes(ymin=lower,ymax=upper),width=0.1)
+
+
+```
+
+The other function we have, `margins` can be used to get the ORs for an interaction model, with their confidence intervals.  It's design and function is much the same as `prediction`, but it won't produce actual odds ratios, only log-odds, so we'll have to exponentiate them manually.
+```{r cont.margin.prob01}
+
+marginsCont.aw = margins(modCont.aw,at=list(wantsMore=c("no","yes")),type='link')
+#here are the log-odds values for each coefficient
+marginsCont.aw
+#the summary object has the errors and CIs as well
+summary(marginsCont.aw)
+#we'll save the output data frame and mutate to create the OR and its CI
+resCont.aw = summary(marginsCont.aw) %>%
+  mutate(
+    OR=exp(AME),
+    OR.lower=exp(lower),
+    OR.upper=exp(upper)
+  ) |>
+  filter(grepl("^age",factor))
+resCont.aw
+```
+
+In the summary we see some important numbers: `AME` is the Average Marginal Effect, and is the number we're most interested in.  The `lower` and `upper` are the CI for the `AME` value, which we will also use.  We convert the AME and its CI to ORs by exponentiating them.
+
+# Continuous Example
+We'll use the NHANES data to explore interaction effects in a linear regression, starting with the figure plots.  
+
+Of note here is the creative use of hex-based colours and what's called the "alpha channel", or the number that controls the transparency of a hex colour.  Look at the objects passed to `col` to get a better idea of how this works.
+
+```{r nhanes.summaryPlot,fig.height=8,fig.width=12}
+
+par(mfrow=c(2,3))
+hist(dat02$age,col=2,main='Age',xlab='Age in Years')
+hist(dat02$weight,col=3,main='Weight',xlab='Weight in Kg')
+plot(dat02$age,dat02$weight,xlab='age',ylab='weight')
+boxplot(age~health,data=dat02,col=paste0(palette()[2],c(60,80,"A0","C0","E0")))
+boxplot(weight~health,data=dat02,col=paste0(palette()[3],c(60,80,"A0","C0","E0")))
+
+```
+
+We'll focus on the interaction model here, as it's the final model of interest.  We'll fit the model and go right to the marginal plot, as that's the easiest summary when working with continuous predictors.
+
+```{r nhanes.marginal, fig.height=5, fig.width=8}
+
+mod.nhanes01 = lm(health.num~age*weight,data=dat02)
+pred.nhanes01 = prediction(mod.nhanes01,at=list(age=c(20,50,80),weight=seq(30,180,by=10)))
+
+summary(pred.nhanes01) |>
+  rename(x=`at(weight)`,
+         group=`at(age)`) |>
+  mutate(group = factor(group)) |>
+  ggplot(aes(x=x,y=Prediction,colour=group,group=group))+
+  geom_point()+
+  geom_line()+
+  geom_errorbar(aes(ymin=lower,ymax=upper),width=2)
+
+
+```
+
+# Stratified models
+Finally, we'll look at how stratified models can be used as an alternative to interaction effects to get effect measures and confidence intervals.  We'll go through all of the interaction models in this lecture and see what they look like as stratifed models.
+
+As a reminder, the general idea is to take one of the components of the interaction model, stratify the dataset by that variable, and build separate regression models for each stratified dataset
+
+## Stress Score Example
+We'll start by stratifying the dataset by gender, and then we'll build two models.  Remember that once we stratify by the variable we need to drop it from the model, so we'll be building two simple linear regressions on treatment.
+
+```{r stratified.stress}
+
+dat.ex.m = dat.ex |> filter(Gender=='M')
+dat.ex.f = dat.ex |> filter(Gender=='F')
+
+modEx.M = lm(StressReduction~Treatment,data=dat.ex.m)
+modEx.F = lm(StressReduction~Treatment,data=dat.ex.f)
+
+summary(modEx.M)
+summary(modEx.F)
+
+
+```
+
+We'll compare the models on their predictions - for each model we'll get the predictions for just that gender from the original predictions dataset above, `newDat.ex`.  I'll pad them with `NA` values to make them the right length, then add them to the previous output.
+```{r stratified.stress.pred}
+#getting predictions
+pred.M = predict(modEx.M,newdata=newDat.ex[4:6,])
+pred.F = predict(modEx.F,newdata=newDat.ex[1:3,])
+
+pred.M = c(NA,NA,NA,pred.M)
+pred.F = c(pred.F,NA,NA,NA)
+
+out.ex = cbind(out.ex,MaleModel=pred.M,femaleModel=pred.F)
+out.ex |> kable() |> kable_styling()
+```
+
+In this particular example we see that the stratified models produce the *exact* same results as the interaction model, since there were no non-interaction terms to bias the results.
+
+## Contraceptive Example
+We could stratify either way, but we'll decide to stratify by wanting more children, since (a) it's easier (4 vs 2 models), and (b) we've been most interested in ORs within that variable (or across ages within each group).
+
+I'll also do the data-subsetting within the function, rather than creating a separate dataset.
+
+```{r stratified.cont}
+
+modCont.no = glm(using~education+age,data=filter(dat,wantsMore=='no'),family=binomial)
+modCont.yes = glm(using~education+age,data=filter(dat,wantsMore=='yes'),family=binomial)
+
+summary(modCont.no)
+summary(modCont.yes)
+```
+
+The models worked, but since they're logistic regressions we need to get ORs.  Fortunately there's no interaction term now, so we can get the ORs as before.
+
+```{r stratified.cont.ORs}
+
+resCont.no = cbind(OR = coef(modCont.no),confint(modCont.no))
+resCont.no = exp(resCont.no)
+resCont.yes = cbind(OR = coef(modCont.yes),confint(modCont.yes))
+resCont.yes = exp(resCont.yes)
+
+resCont.no |> kable() |> kable_styling()
+resCont.yes |> kable() |> kable_styling()
+```
+
+The resulting ORs aren't exactly the same as the interaction model - when stratifying you're getting the interaction between the stratifying variable and ALL the other model variables, so we're incorporating an interaction with education here that we didn't before.  We can see the differences in the table below:
+
+```{r stratified.cont.compare}
+#this is a function to convert an OR and a CI in three columns to one 
+getOR = function(mat){
+  out = sprintf("%.3f, [%.2f, %.2f]",mat[,1],mat[,2],mat[,3])
+  out
+}
+
+#pulling the results of the interaction model, and re-arranging them by row
+o1 = resCont.aw[c(1,3,5,2,4,6),c(1,2,9,10,11)]
+out = cbind(o1[,1:2],inter=NA,no=NA,yes=NA)
+out$inter=getOR(o1[,3:5])
+out$no[1:3]=getOR(resCont.no)[3:5]
+out$yes[4:6]=getOR(resCont.yes)[3:5]
+out |> kable() |> kable_styling()
+
+```
+
+## NHANES Continuous Example
+This is the hardest of the three interaction models to replicate, since it's so hard to stratify by continuous variables.  I'll follow the pattern in the lecture, stratifying the datasets by age.
+
+```{r stratified.nhanes}
+#based on the quanitles I'll split at 35 and 60 (approx 1/3 per group)
+q = quantile(dat02$age,probs=seq(0,1,0.1))
+dat02$ageGrp = cut(dat02$age,breaks=c(0,35,60,100),labels=c("Y","M","O"))
+d1 = dat02[which(dat02$ageGrp=='Y'),]
+d2 = dat02[which(dat02$ageGrp=='M'),]
+d3 = dat02[which(dat02$ageGrp=='O'),]
+#I'm going to put the three models in a list, to keep them together
+mod.nhanes.strat = list(
+  mod.nhanes.Y = lm(health.num~weight,data=d1),
+  mod.nhanes.M = lm(health.num~weight,data=d2),
+  mod.nhanes.O = lm(health.num~weight,data=d3)
+)
+#lapply does something to each element in a list
+temp = lapply(mod.nhanes.strat,function(x){cbind(coef(x),confint(x))[2,]})
+do.call(cbind,temp)
+```
+The effect didn't seem to work when looking at three groups, but maybe more groups?
+
+```{r stratified.nhanes02}
+
+dat02$ageGrp02 = cut(dat02$age,breaks=q)
+dat02.strat = list()
+l = levels(dat02$ageGrp02)
+for(i in 1:10){
+  dat02.strat[[i]] = subset(dat02,dat02$ageGrp02==l[i])
+}
+#using lapply to get 10 models
+mod.nhanes.strat02 = lapply(dat02.strat,function(d){lm(health.num~weight,data=d)})
+#getting the coefficients for each model again
+temp = lapply(mod.nhanes.strat02,function(x){cbind(coef(x),confint(x))[2,]})
+do.call(cbind,temp)
+```
+
+
+The pattern just can't be elucidated from the stratified model, because the models we're building are so different from the interaction model we built before.
